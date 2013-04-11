@@ -20,9 +20,11 @@ function cairo.status()
    local cairo = lgi.cairo
 
    for name, value in pairs(cairo.Status) do
-       checkv(cairo.Status.to_string(name),
-	      cairo.Status.to_string(value),
-	      'string')
+      if type(name) == 'string' and type(value) == 'number' then
+	 checkv(cairo.Status.to_string(name),
+		cairo.Status.to_string(value),
+		'string')
+      end
    end
 end
 
