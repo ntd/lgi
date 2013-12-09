@@ -44,3 +44,74 @@ function glib.timer()
    for i = 1, 1000000 do end
    check(timer:elapsed() == el2)
 end
+
+function glib.markup_base()
+   local MarkupParser = lgi.GLib.MarkupParser
+   local MarkupParseContext = lgi.GLib.MarkupParseContext
+
+   local p = MarkupParser()
+   local el, at = {}, {}
+   function p.start_element(context, element_name, attrs)
+      el[#el + 1] = element_name
+      at[#at + 1] = attrs
+   end
+   function p.end_element(context)
+   end
+   function p.text(context, text, len)
+   end
+   function p.passthrough(context, text, len)
+   end
+
+   local pc = MarkupParseContext(p, {})
+   local ok, err = pc:parse([[
+<map>
+ <entry key='method' value='printf' />
+</map>
+]])
+   check(ok)
+   check(#el == 2)
+   check(el[1] == 'map')
+   check(el[2] == 'entry')
+   check(#at == 2)
+   check(not next(at[1]))
+   check(at[2].key == 'method')
+   check(at[2].value == 'printf')
+end
+
+function glib.markup_error1()
+   local MarkupParser = lgi.GLib.MarkupParser
+   local MarkupParseContext = lgi.GLib.MarkupParseContext
+
+   local saved_err
+   local parser = MarkupParser {
+      error = function(context, error)
+	 saved_err = error
+      end,
+   }
+   local context = MarkupParseContext(parser, 0)
+   local ok, err = context:parse('invalid>uh')
+   check(not ok)
+   check(err:matches(saved_err))
+end
+
+function glib.markup_error2()
+   local GLib = lgi.GLib
+   local MarkupParser = GLib.MarkupParser
+   local MarkupParseContext = GLib.MarkupParseContext
+
+   local saved_err
+   local parser = MarkupParser {
+      error = function(context, error)
+	 saved_err = error
+      end,
+      start_element = function(context, element)
+	 error(GLib.MarkupError('UNKNOWN_ELEMENT', 'snafu %d', 1))
+      end,
+   }
+   local context = MarkupParseContext(parser, {})
+   local ok, err = context:parse('<e/>')
+   check(not ok)
+   check(err:matches(GLib.MarkupError, 'UNKNOWN_ELEMENT'))
+   check(err.message == 'snafu 1')
+   check(saved_err:matches(err))
+end
