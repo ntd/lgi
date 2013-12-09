@@ -83,6 +83,28 @@ function Object:_construct(gtype, param, owns)
    -- Create the object.
    object = object_new(gtype, parameters)
 
+   -- Perform initialization on interfaces.
+   if next(self._implements) then
+      local inited
+      for _, initname in ipairs { '_init1', '_init2' } do
+	 for _, interface in pairs(self._implements) do
+	    local init = interface[initname]
+	    if init then
+	       local ok, err = init(object)
+	       if not ok then return nil, err end
+	       if ok == '_initskip' then
+		  -- This initializer does not apply, continue looking
+		  -- for others.
+	       else
+		  inited = true
+		  break;
+	       end
+	    end
+	 end
+	 if inited then break end
+      end
+   end
+
    -- Attach arguments previously filtered out from creation.
    for name, value in pairs(others) do
       if type(name) == 'string' then object[name] = value end
@@ -106,8 +128,18 @@ end
 -- specified GType.
 function Object.new(gtype, params, owns)
    -- Find proper repo instance for gtype.
-   local self = core.repotype(gtype)
-   return self:_construct(gtype, params, owns)
+   local gtype_walker, self = gtype
+   while true do
+      local self = core.repotype(gtype_walker)
+      if self then
+	 -- We have repo instance, use it to construct the object.
+	 return self:_construct(gtype, params, owns)
+      end
+      gtype_walker = Type.parent(gtype_walker)
+      if not gtype_walker then
+	 error(("`%s': cannot create object, type not found"):format(gtype), 2)
+      end
+   end
 end
 
 -- Initially unowned creation is similar to normal GObject creation,
@@ -140,7 +172,7 @@ function Object:_element(object, name)
    for i = 1, #interfaces do
       local info = gi[core.gtype(interfaces[i])]
       local iface = info and repo[info.namespace][info.name]
-      if iface then element, category = iface:_element(object, name) end
+      if iface then element, category = iface:_element(object, name, self) end
       if element then return element, category end
    end
 

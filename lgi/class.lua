@@ -2,7 +2,7 @@
 --
 --  LGI Support for generic GType objects and interfaces
 --
---  Copyright (c) 2010, 2011, 2012 Pavel Holejsovsky
+--  Copyright (c) 2010, 2011, 2012, 2013 Pavel Holejsovsky
 --  Licensed under the MIT license:
 --  http://www.opensource.org/licenses/mit-license.php
 --
@@ -147,7 +147,7 @@ function class.class_mt:_element(instance, symbol)
    end
    local implements = rawget(self, '_implements') or {}
    for _, implemented in pairs(implements or {}) do
-      element, category = implemented:_element(instance, symbol)
+      element, category = implemented:_element(instance, symbol, self)
       if element then return element, category end
    end
 end
@@ -232,6 +232,7 @@ function class.load_interface(namespace, info)
       interface._virtual = component.get_category(
 	 info.vfuncs, nil, load_vfunc_name, load_vfunc_name_reverse)
       interface._class = record.load(type_struct)
+      interface._class._allow = true
       interface._class._parent = core.repo.GObject.TypeInterface
    end
    interface._new = find_constructor(info)
@@ -264,6 +265,7 @@ function class.load_class(namespace, info)
       class._virtual = component.get_category(
 	 info.vfuncs, nil, load_vfunc_name, load_vfunc_name_reverse)
       class._class = record.load(type_struct)
+      class._class._allow = true
       class._class._parent =
 	 parent and parent._class or core.repo.GObject.TypeClass
    end

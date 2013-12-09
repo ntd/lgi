@@ -59,9 +59,6 @@ for _, name in pairs {
    end
 end
 
-cairo._enum.Status.to_string = core.callable.new {
-   addr = cairo._module.cairo_status_to_string, ret = ti.utf8, cairo._enum.Status }
-
 -- Load definitions of all boxed records.
 cairo._struct = cairo._struct or {}
 for index, struct in pairs {
@@ -97,6 +94,12 @@ cairo._union.PathData = component.create(nil, record.union_mt, 'cairo.PathData')
 
 -- Populate methods into records.
 for _, info in ipairs {
+   {  'Status',
+      methods = {
+	 to_string = { static = true, ret = ti.utf8, cairo.Status }
+      },
+   },
+
    {  'Rectangle',
       fields = {
 	 { 'x', ti.double }, { 'y', ti.double },
@@ -156,11 +159,6 @@ for _, info in ipairs {
 	 { 'status', cairo.Status },
 	 { 'data', cairo.PathData, ptr = true },
 	 { 'num_data', ti.int },
-      },
-
-      methods = {
-	 extents = { { ti.double, dir = 'out' }, { ti.double, dir = 'out' },
-		     { ti.double, dir = 'out' }, { ti.double, dir = 'out' } },
       },
    },
 
@@ -239,7 +237,7 @@ for _, info in ipairs {
 			  { ti.double, dir = 'out' } },
 	 in_fill = { ret = ti.boolean, ti.double, ti.double },
 	 mask = { cairo.Pattern },
-	 mask_surface = { cairo.Pattern, ti.double, ti.double },
+	 mask_surface = { cairo.Surface, ti.double, ti.double },
 	 paint = {},
 	 paint_with_alpha = { ti.double },
 	 stroke = {},
@@ -314,9 +312,10 @@ for _, info in ipairs {
       },
 
       properties = {
-	 'status', 'target', 'source', 'antialias', 'fill_rule', 'line_cap',
-	 'line_join', 'line_width', 'miter_limit', 'operator', 'tolerance',
-	 'font_size', 'font_face', 'scaled_font',
+	 'status', 'target', 'group_target', 'source', 'antialias', 'fill_rule',
+	 'line_cap', 'line_join', 'line_width', 'miter_limit', 'operator',
+	 'tolerance', 'font_size', 'font_face', 'font_matrix', 'scaled_font',
+	 'matrix',
       },
    },
 

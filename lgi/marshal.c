@@ -1,7 +1,7 @@
 /*
  * Dynamic Lua binding to GObject using dynamic gobject-introspection.
  *
- * Copyright (c) 2010-2012 Pavel Holejsovsky
+ * Copyright (c) 2010-2013 Pavel Holejsovsky
  * Licensed under the MIT license:
  * http://www.opensource.org/licenses/mit-license.php
  *
@@ -240,6 +240,12 @@ array_get_elt_size (GITypeInfo *ti)
   return size;
 }
 
+static void
+array_detach (GArray *array)
+{
+  g_array_free (array, FALSE);
+}
+
 /* Marshalls array from Lua to C. Returns number of temporary elements
    pushed to the stack. */
 static int
@@ -309,7 +315,9 @@ marshal_2c_array (lua_State *L, GITypeInfo *ti, GIArrayType atype,
 	      array = g_array_sized_new (zero_terminated, TRUE, esize,
 					 *out_size);
 	      g_array_set_size (array, *out_size);
-	      *lgi_guard_create (L, (GDestroyNotify) g_array_unref) = array;
+	      *lgi_guard_create (L, (GDestroyNotify)
+				 (transfer == GI_TRANSFER_EVERYTHING
+				  ? array_detach : g_array_unref)) = array;
 	      vals = 1;
 	    }
 
@@ -390,14 +398,18 @@ marshal_2lua_array (lua_State *L, GITypeInfo *ti, GIDirection dir,
   eti_guard = lua_gettop (L);
   esize = array_get_elt_size (eti);
 
-  if (esize == 1 && g_type_info_get_tag (eti) == GI_TYPE_TAG_UINT8)
+  /* Note that we ignore is_pointer check for uint8 type.  Although it
+     is not exactly correct, we probably would not handle uint8*
+     correctly anyway, this is strange type to use, and moreover this
+     is workaround for g-ir-scanner bug which might mark elements of
+     uint8 arrays as gconstpointer, thus setting is_pointer=true on
+     it.  See https://github.com/pavouk/lgi/issues/57 */
+  if (g_type_info_get_tag (eti) == GI_TYPE_TAG_UINT8)
     {
-      /* UINT8 arrays are marshalled as 'bytes' instances. */
+      /* UINT8 arrays are marshalled as Lua strings. */
       if (len < 0)
 	len = data ? strlen(data) : 0;
-      memcpy (lua_newuserdata (L, len), data, len);
-      luaL_getmetatable (L, LGI_BYTES_BUFFER);
-      lua_setmetatable (L, -2);
+      lua_pushlstring (L, data, len);
     }
   else
     {
@@ -700,18 +712,9 @@ marshal_2lua_error (lua_State *L, GITransfer xfer, GError *err)
     lua_pushnil (L);
   else
     {
-      /* Create Lua table with duplicated error information. */
-      lua_newtable (L);
-      lua_pushstring (L, g_quark_to_string (err->domain));
-      lua_setfield (L, -2, "domain");
-      lua_pushstring (L, err->message);
-      lua_setfield (L, -2, "message");
-      lua_pushnumber (L, err->code);
-      lua_setfield (L, -2, "code");
-
-      /* If the ownership is transferred, free the original error. */
-      if (xfer != GI_TRANSFER_NOTHING)
-	g_error_free (err);
+      /* Wrap error instance with GLib.Error record. */
+      lgi_type_get_repotype (L, G_TYPE_ERROR, NULL);
+      lgi_record_2lua (L, err, xfer != GI_TRANSFER_NOTHING, 0);
     }
 }
 
@@ -724,13 +727,33 @@ marshal_2c_callable (lua_State *L, GICallableInfo *ci, GIArgInfo *ai,
   int nret = 0;
   GIScopeType scope;
   gpointer user_data = NULL;
+  gint nargs = 0;
+
+  if (argci != NULL)
+    nargs = g_callable_info_get_n_args (argci);
 
   /* Check 'nil' in optional case.  In this case, return NULL as
      callback. */
-  if (optional && lua_isnoneornil (L, narg))
+  if (lua_isnoneornil (L, narg))
     {
-      *callback = NULL;
-      return 0;
+      if (optional)
+	{
+	  *callback = NULL;
+
+	  /* Also set associated destroy handler to NULL, because some
+	     callees tend to call it when left as garbage even when
+	     main callback is NULL (gtk_menu_popup_for_device()
+	     case). */
+	  if (ai != NULL)
+	    {
+	      gint arg = g_arg_info_get_destroy (ai);
+	      if (arg >= 0 && arg < nargs)
+		((GIArgument *) args[arg])->v_pointer = NULL;
+	    }
+	  return 0;
+	}
+      else
+	return luaL_argerror (L, narg, "nil is not allowed");
     }
 
   /* Check lightuserdata case; simply use that data if provided. */
@@ -742,7 +765,6 @@ marshal_2c_callable (lua_State *L, GICallableInfo *ci, GIArgInfo *ai,
 
   if (argci != NULL)
     {
-      gint nargs = g_callable_info_get_n_args (argci);
       gint arg = g_arg_info_get_closure (ai);
 
       /* user_data block is already preallocated from function call. */
@@ -772,7 +794,8 @@ marshal_2c_callable (lua_State *L, GICallableInfo *ci, GIArgInfo *ai,
     }
 
   /* Create the closure. */
-  *callback = lgi_closure_create (L, user_data, ci, narg,
+  lgi_callable_create (L, ci, NULL);
+  *callback = lgi_closure_create (L, user_data, narg,
 				  scope == GI_SCOPE_TYPE_ASYNC);
   return nret;
 }
@@ -1030,7 +1053,7 @@ lgi_marshal_2c_caller_alloc (lua_State *L, GITypeInfo *ti, GIArgument *val,
 	    if (pos == 0)
 	      {
 		lgi_type_get_repotype (L, G_TYPE_INVALID, ii);
-		val->v_pointer = lgi_record_new (L, 1);
+		val->v_pointer = lgi_record_new (L, 1, FALSE);
 	      }
 	    handled = TRUE;
 	  }
@@ -1186,11 +1209,16 @@ lgi_marshal_2lua (lua_State *L, GITypeInfo *ti, GIArgInfo *ai, GIDirection dir,
 
 	  case GI_INFO_TYPE_STRUCT:
 	  case GI_INFO_TYPE_UNION:
-	    lgi_type_get_repotype (L, G_TYPE_INVALID, info);
-	    lgi_record_2lua (L, parent == LGI_PARENT_FORCE_POINTER ||
-			     g_type_info_is_pointer (ti)
-			     ? arg->v_pointer : source, own, parent);
-	    break;
+	    {
+	      gboolean by_ref = parent == LGI_PARENT_FORCE_POINTER ||
+		g_type_info_is_pointer (ti);
+	      if (parent < LGI_PARENT_CALLER_ALLOC && by_ref)
+		parent = 0;
+	      lgi_type_get_repotype (L, G_TYPE_INVALID, info);
+	      lgi_record_2lua (L, by_ref ? arg->v_pointer : source,
+			       own, parent);
+	      break;
+	    }
 
 	  case GI_INFO_TYPE_OBJECT:
 	  case GI_INFO_TYPE_INTERFACE:
@@ -1269,14 +1297,15 @@ lgi_marshal_field (lua_State *L, gpointer object, gboolean getmode,
       GIFieldInfo **fi = lua_touserdata (L, field_arg);
       GIFieldInfoFlags flags;
 
-      /* Check, whether field is readable/writable.  Turn off this
-	 check for class structures, because we need to read/write
-	 their virtual function pointers. */
-      if (!g_struct_info_is_gtype_struct (g_base_info_get_container (*fi)))
-	{
-	  flags = g_field_info_get_flags (*fi);
-	  if ((flags & (getmode ? GI_FIELD_IS_READABLE
+      /* Check, whether field is readable/writable. */
+      flags = g_field_info_get_flags (*fi);
+      if ((flags & (getmode ? GI_FIELD_IS_READABLE
 			: GI_FIELD_IS_WRITABLE)) == 0)
+	{
+	  /* Check,  whether  parent  did not  disable  access  checks
+	     completely. */
+	  lua_getfield (L, -1, "_allow");
+	  if (!lua_toboolean (L, -1))
 	    {
 	      /* Prepare proper error message. */
 	      lua_concat (L,
@@ -1287,6 +1316,7 @@ lgi_marshal_field (lua_State *L, gpointer object, gboolean getmode,
 				 g_base_info_get_name (*fi),
 				 getmode ? "readable" : "writable");
 	    }
+	  lua_pop (L, 1);
 	}
 
       /* Map GIArgument to proper memory location, get typeinfo of the
@@ -1337,7 +1367,7 @@ lgi_marshal_field (lua_State *L, gpointer object, gboolean getmode,
 	      {
 		g_assert (kind == 1);
 		lgi_record_2c (L, val_arg, arg->v_pointer,
-			       FALSE, FALSE, FALSE, FALSE);
+			       FALSE, TRUE, FALSE, FALSE);
 		return 0;
 	      }
 	    break;
@@ -1393,7 +1423,7 @@ lgi_marshal_field (lua_State *L, gpointer object, gboolean getmode,
     }
   else
     {
-      lgi_marshal_2c (L, ti, NULL, GI_TRANSFER_NOTHING, object, val_arg,
+      lgi_marshal_2c (L, ti, NULL, GI_TRANSFER_EVERYTHING, object, val_arg,
 		      0, NULL, NULL);
       nret = 0;
     }
@@ -1666,10 +1696,16 @@ marshal_callback (lua_State *L)
   gpointer user_data, addr;
   GICallableInfo **ci;
 
-  ci = lgi_udata_test (L, 1, LGI_GI_INFO);
   user_data = lgi_closure_allocate (L, 1);
   *lgi_guard_create (L, lgi_closure_destroy) = user_data;
-  addr = lgi_closure_create (L, user_data, *ci, 2, FALSE);
+  if (lua_istable (L, 1))
+    lgi_callable_parse (L, 1);
+  else
+    {
+      ci = lgi_udata_test (L, 1, LGI_GI_INFO);
+      lgi_callable_create (L, *ci, NULL);
+    }
+  addr = lgi_closure_create (L, user_data, 2, FALSE);
   lua_pushlightuserdata (L, addr);
   return 2;
 }
@@ -1703,7 +1739,8 @@ marshal_closure_set_marshal (lua_State *L)
   lgi_type_get_repotype (L, G_TYPE_CLOSURE, NULL);
   lgi_record_2c (L, 1, &closure, FALSE, FALSE, FALSE, FALSE);
   user_data = lgi_closure_allocate (L, 1);
-  marshal = lgi_closure_create (L, user_data, ci, 2, FALSE);
+  lgi_callable_create (L, ci, NULL);
+  marshal = lgi_closure_create (L, user_data, 2, FALSE);
   g_closure_set_marshal (closure, marshal);
   g_closure_add_invalidate_notifier (closure, user_data, gclosure_destroy);
   return 0;
