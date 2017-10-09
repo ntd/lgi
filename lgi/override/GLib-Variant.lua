@@ -23,8 +23,6 @@ local variant_info = gi.GLib.Variant
 -- Add custom methods for variant handling.
 Variant._refsink = variant_info.methods.ref_sink
 Variant._free = variant_info.methods.unref
-Variant._setvalue = gi.GObject.Value.methods.set_variant
-Variant._getvalue = gi.GObject.Value.methods.get_variant
 
 -- Add 'type' property to variant, an alias to get_type().
 Variant._attribute = { type = { get = Variant.get_type_string } }
@@ -170,6 +168,10 @@ end
 
 -- Variant.new() is just a facade over variant_new backend.
 function Variant.new(vt, val)
+   if type(vt) == 'userdata' then
+      -- Wrap existing pointer to variant.
+      return core.record.new(Variant, vt, val)
+   end
    if type(vt) ~= 'string' then vt = vt:dup_string() end
    local v, epos = variant_new(vt, 1, val)
    if not v or epos ~= #vt + 1 then

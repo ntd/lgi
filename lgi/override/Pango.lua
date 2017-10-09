@@ -49,8 +49,7 @@ for _, enum in pairs {
    if not Pango[enum]._gtype then
       local gtype = ffi.load_gtype(
 	 core.gi.Pango.resolve,
-	 'pango_' .. enum:gsub('([%l%d])([%u])', '%1_%2'):lower()
-	 .. '_get_type')
+	 'pango_' .. core.uncamel(enum) .. '_get_type')
       Pango._enum[enum] = ffi.load_enum(gtype, 'Pango.' .. enum)
    end
 end
@@ -165,4 +164,18 @@ if gi.Pango.Layout.methods.move_cursor_visually.args[6].direction ~= 'out' then
       ti.boolean, ti.int, ti.int, ti.int,
       { ti.int, dir = 'out' }, { ti.int, dir = 'out' },
    }
+end
+
+-- Pango.GlyphString is struct with counted array inside, until
+-- Pango-1.38 which has fixed annotation.  Fix for previous versions.
+if gi.Pango.GlyphString.fields.glyphs.typeinfo.tag ~= 'array' then
+   Pango.GlyphString._attribute = { glyphs = {} }
+   function Pango.GlyphString._attribute.glyphs:get()
+      local array = core.record.field(self, Pango.GlyphString._field.glyphs)
+      local glyphs = {}
+      for i = 0, self.num_glyphs - 1 do
+	 glyphs[i + 1] = core.record.fromarray(array, i)
+      end
+      return glyphs
+   end
 end

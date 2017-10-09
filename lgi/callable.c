@@ -539,7 +539,7 @@ callable_param_parse (lua_State *L, Param *param)
 
 /* Parses callable from given table. */
 int
-lgi_callable_parse (lua_State *L, int info)
+lgi_callable_parse (lua_State *L, int info, gpointer addr)
 {
   Callable *callable;
   int nargs, i;
@@ -558,9 +558,13 @@ lgi_callable_parse (lua_State *L, int info)
   lua_rawseti (L, -2, 0);
 
   /* Get address of the function. */
-  lua_getfield (L, info, "addr");
-  callable->address = lua_touserdata (L, -1);
-  lua_pop (L, 1);
+  if (addr == NULL)
+    {
+      lua_getfield (L, info, "addr");
+      addr = lua_touserdata (L, -1);
+      lua_pop (L, 1);
+    }
+  callable->address = addr;
 
   /* Handle 'return' table. */
   lua_getfield (L, info, "ret");
@@ -647,30 +651,61 @@ callable_gc (lua_State *L)
     callable_param_destroy (&callable->params[i]);
 
   callable_param_destroy (&callable->retval );
+
+  /* Unset the metatable / make the callable unusable */
+  lua_pushnil (L);
+  lua_setmetatable (L, 1);
   return 0;
 }
 
-static int
-callable_tostring (lua_State *L)
+static void
+callable_describe (lua_State *L, Callable *callable, FfiClosure *closure)
 {
-  Callable *callable = callable_get (L, 1);
+  luaL_checkstack (L, 2, "");
+
+  if (closure == NULL)
+    lua_pushfstring (L, "%p", callable->address);
+  else
+    {
+      gconstpointer ptr;
+      lua_rawgeti (L, LUA_REGISTRYINDEX, closure->target_ref);
+      ptr = lua_topointer (L, -1);
+      if (ptr != NULL)
+	lua_pushfstring (L, "%s: %p", luaL_typename (L, -1),
+			 lua_topointer (L, -1));
+      else
+	lua_pushstring (L, luaL_typename (L, -1));
+      lua_replace (L, -2);
+    }
+
   if (callable->info)
     {
-      lua_pushfstring (L, "lgi.%s (%p): ",
+      lua_pushfstring (L, "lgi.%s (%s): ",
 		       (GI_IS_FUNCTION_INFO (callable->info) ? "fun" :
 			(GI_IS_SIGNAL_INFO (callable->info) ? "sig" :
 			 (GI_IS_VFUNC_INFO (callable->info) ? "vfn" : "cbk"))),
-		       callable->address);
+		       lua_tostring (L, -1));
       lua_concat (L, lgi_type_get_name (L, callable->info) + 1);
     }
   else
     {
       lua_getfenv (L, 1);
       lua_rawgeti (L, -1, 0);
-      lua_pushfstring (L, "lgi.efn (%p): %s", callable->address,
+      lua_replace (L, -2);
+      lua_pushfstring (L, "lgi.efn (%s): %s", lua_tostring (L, -2),
 		       lua_tostring (L, -1));
+      lua_replace (L, -2);
     }
 
+  lua_replace (L, -2);
+}
+
+static int
+callable_tostring (lua_State *L)
+{
+  Callable *callable = callable_get (L, 1);
+
+  callable_describe (L, callable, NULL);
   return 1;
 }
 
@@ -864,6 +899,10 @@ callable_call (lua_State *L)
 	    lua_insert (L, -nret - 1);
 	    caller_allocated++;
 	  }
+	else
+	  /* Normal OUT parameters.  Ideally we don't have to touch
+	     them, but see https://github.com/pavouk/lgi/issues/118 */
+	  memset (&args[argi], 0, sizeof (args[argi]));
       }
     else if (param->internal_user_data)
       /* Provide userdata for the callback. */
@@ -977,7 +1016,7 @@ callable_index (lua_State *L)
   Callable *callable = callable_get (L, 1);
   const gchar *verb = lua_tostring (L, 2);
   if (g_strcmp0 (verb, "info") == 0)
-    return lgi_gi_info_new (L, callable->info);
+    return lgi_gi_info_new (L, g_base_info_ref (callable->info));
   else if (g_strcmp0 (verb, "params") == 0)
     {
       int index = 1, i;
@@ -1066,13 +1105,13 @@ closure_callback (ffi_cif *cif, void *ret, void **args, void *closure_arg)
   gint res = 0, npos, i, stacktop;
   gboolean call;
   Param *param;
+  lua_State *L;
   (void)cif;
 
   /* Get access to proper Lua context. */
-  lua_State *L = block->callback.L;
   lgi_state_enter (block->callback.state_lock);
-  lua_rawgeti (L, LUA_REGISTRYINDEX, block->callback.thread_ref);
-  L = lua_tothread (L, -1);
+  lua_rawgeti (block->callback.L, LUA_REGISTRYINDEX, block->callback.thread_ref);
+  L = lua_tothread (block->callback.L, -1);
   call = (closure->target_ref != LUA_NOREF);
   if (call)
     {
@@ -1085,8 +1124,9 @@ closure_callback (ffi_cif *cif, void *ret, void **args, void *closure_arg)
 	     the routine we are about to call is actually going to
 	     resume it.  Create new thread instead and switch closure
 	     to its context. */
-	  L = lua_newthread (L);
+	  lua_State *newL = lua_newthread (L);
 	  lua_rawseti (L, LUA_REGISTRYINDEX, block->callback.thread_ref);
+	  L = newL;
 	}
       lua_pop (block->callback.L, 1);
       block->callback.L = L;
@@ -1140,9 +1180,20 @@ closure_callback (ffi_cif *cif, void *ret, void **args, void *closure_arg)
     if (!param->internal && param->dir != GI_DIRECTION_OUT)
       {
 	if G_LIKELY (i != 3 || !callable->is_closure_marshal)
-	  callable_param_2lua (L, param, args[i + callable->has_self], 0,
-			       callable_index, callable,
-			       args + callable->has_self);
+	  {
+	    GIArgument *real_arg = args[i + callable->has_self];
+	    GIArgument arg_value;
+
+	    if (param->dir == GI_DIRECTION_INOUT)
+	      {
+	        arg_value = *(GIArgument *) real_arg->v_pointer;
+	        real_arg = &arg_value;
+	      }
+
+	    callable_param_2lua (L, param, real_arg, 0,
+			         callable_index, callable,
+			         args + callable->has_self);
+	  }
 	else
 	  {
 	    /* Workaround incorrectly annotated but crucial
@@ -1171,9 +1222,14 @@ closure_callback (ffi_cif *cif, void *ret, void **args, void *closure_arg)
   if (call)
     {
       if (callable->throws)
-	res = lua_pcall (L, npos, LUA_MULTRET, 0);
-      else
-	lua_call (L, npos, LUA_MULTRET);
+        res = lua_pcall (L, npos, LUA_MULTRET, 0);
+      else if (lua_pcall (L, npos, LUA_MULTRET, 0) != 0)
+        {
+          callable_describe (L, callable, closure);
+          g_warning ("Error raised while calling '%s': %s",
+                     lua_tostring (L, -1), lua_tostring (L, -2));
+          lua_pop (L, 2);
+        }
     }
   else
     {
@@ -1422,17 +1478,18 @@ lgi_closure_create (lua_State *L, gpointer user_data,
 }
 
 /* Creates new Callable instance according to given gi.info. Lua prototype:
-   callable = callable.new(callable_info) or
-   callable = callable.new(description_table) */
+   callable = callable.new(callable_info[, addr]) or
+   callable = callable.new(description_table[, addr]) */
 static int
 callable_new (lua_State *L)
 {
+  gpointer addr = lua_touserdata (L, 2);
   if (lua_istable (L, 1))
-    return lgi_callable_parse (L, 1);
+    return lgi_callable_parse (L, 1, addr);
   else
     return lgi_callable_create (L,  *(GICallableInfo **)
-				luaL_checkudata (L, 1, LGI_GI_INFO),
-				NULL);
+				  luaL_checkudata (L, 1, LGI_GI_INFO),
+				  addr);
 }
 
 /* Callable module public API table. */

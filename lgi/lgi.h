@@ -13,11 +13,20 @@
 
 /* Lua 5.2 compatibility stuff. */
 #if LUA_VERSION_NUM >= 502
+#ifndef luaL_register
 #define luaL_register(L, null, regs) luaL_setfuncs (L, regs, 0)
+#endif
+#ifndef lua_equal
 #define lua_equal(L, p1, p2) lua_compare (L, p1, p2, LUA_OPEQ)
+#endif
+#ifndef lua_objlen
 #define lua_objlen(L, p) lua_rawlen (L, p)
+#endif
 #define lua_setfenv(L, p) lua_setuservalue (L, p)
 #define lua_getfenv(L, p) lua_getuservalue (L, p)
+#ifndef luaL_checkint
+#define luaL_checkint(L, p) luaL_checkinteger (L, p)
+#endif
 #endif
 
 #include <glib.h>
@@ -122,7 +131,7 @@ gboolean lgi_marshal_2c_caller_alloc (lua_State *L, GITypeInfo *ti,
 void lgi_marshal_2lua (lua_State *L, GITypeInfo *ti, GIArgInfo *ai,
 		       GIDirection dir, GITransfer xfer,
 		       gpointer source, int parent,
-		       GICallableInfo *ci, void **args);
+		       GICallableInfo *ci, void *args);
 
 /* Marshalls field to/from given memory (struct, union or
    object). Returns number of results pushed to the stack (0 or 1). */
@@ -138,7 +147,7 @@ int lgi_marshal_access (lua_State *L, gboolean getmode,
 int lgi_callable_create (lua_State *L, GICallableInfo *ci, gpointer addr);
 
 /* Parses callable from table-driven info description. */
-int lgi_callable_parse (lua_State *L, int info);
+int lgi_callable_parse (lua_State *L, int info, gpointer addr);
 
 /* Creates container block for allocated closures.  Returns address of
    the block, suitable as user_data parameter. */

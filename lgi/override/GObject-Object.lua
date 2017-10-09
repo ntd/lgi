@@ -1,8 +1,8 @@
 ------------------------------------------------------------------------------
 --
---  LGI Object handling.
+--  lgi GObject.Object handling.
 --
---  Copyright (c) 2010, 2011 Pavel Holejsovsky
+--  Copyright (c) 2010-2014 Pavel Holejsovsky
 --  Licensed under the MIT license:
 --  http://www.opensource.org/licenses/mit-license.php
 --
@@ -14,17 +14,34 @@ local pairs, select, setmetatable, error, type
 local core = require 'lgi.core'
 local gi = core.gi
 local repo = core.repo
+local ffi = require 'lgi.ffi'
+local ti = ffi.types
 
 local Value = repo.GObject.Value
 local Type = repo.GObject.Type
 local Closure = repo.GObject.Closure
 
+local TypeClass = repo.GObject.TypeClass
 local Object = repo.GObject.Object
 
--- Object constructor, 'param' contains table with properties/signals
+-- Add overrides for GObject.TypeClass
+TypeClass._free = gi.GObject.resolve.g_type_class_unref
+local type_class_ref = core.callable.new {
+   addr = gi.GObject.resolve.g_type_class_ref,
+   ret = ti.ptr, ti.GType
+}
+function TypeClass:_new()
+   local ptr = type_class_ref(self._gtype)
+   return core.record.new(self, ptr, true)
+end
+
+-- Object constructor, 'param' contains table _with properties/signals
 -- to initialize.
 local parameter_repo = repo.GObject.Parameter
-local object_new = gi.GObject.Object.methods.new
+-- Before GLib 2.54, g_object_newv() was annotated with [rename-to g_object_new].
+-- Starting from GLib 2.54, g_object_new_with_properties() has this annotation.
+-- We always want g_object_newv().
+local object_new = gi.GObject.Object.methods.newv or gi.GObject.Object.methods.new
 if object_new then
    object_new = core.callable.new(object_new)
 else
@@ -60,6 +77,7 @@ function Object:_construct(gtype, param, owns)
 	 if gi.isinfo(argtype) and argtype.is_property then
 	    local parameter = core.record.new(parameter_repo)
 	    name = argtype.name
+	    local value = parameter.value
 
 	    -- Store the name string in some safe Lua place ('safe'
 	    -- table), because param is GParameter, which contains
@@ -67,12 +85,13 @@ function Object:_construct(gtype, param, owns)
 	    -- Lua-GC'ed while still referenced by GParameter
 	    -- instance.
 	    safe[#safe + 1] = name
+	    safe[#safe + 1] = value
 
 	    parameter.name = name
 	    local gtype = Type.from_typeinfo(argtype.typeinfo)
-	    Value.init(parameter.value, gtype)
+	    Value.init(value, gtype)
 	    local marshaller = Value.find_marshaller(gtype, argtype.typeinfo)
-	    marshaller(parameter.value, nil, arg)
+	    marshaller(value, nil, arg)
 	    parameters[#parameters + 1] = parameter
 	 else
 	    others[name] = arg
@@ -128,7 +147,7 @@ end
 -- specified GType.
 function Object.new(gtype, params, owns)
    -- Find proper repo instance for gtype.
-   local gtype_walker, self = gtype
+   local gtype_walker = gtype
    while true do
       local self = core.repotype(gtype_walker)
       if self then
@@ -138,6 +157,57 @@ function Object.new(gtype, params, owns)
       gtype_walker = Type.parent(gtype_walker)
       if not gtype_walker then
 	 error(("`%s': cannot create object, type not found"):format(gtype), 2)
+      end
+   end
+end
+
+-- Prepare callbacks for get_property and set_property
+local get_property_guard, get_property_addr = core.marshal.callback(
+   gi.GObject.ObjectClass.fields.get_property.typeinfo.interface,
+   function(self, prop_id, value, pspec)
+      local name = pspec.name:gsub('%-', '_')
+      local prop_get = core.object.query(self, 'repo')._property_get[name]
+      if prop_get then
+	 value.value = prop_get(self)
+      else
+	 value.value = self.priv[name]
+      end
+end)
+
+local set_property_guard, set_property_addr = core.marshal.callback(
+   gi.GObject.ObjectClass.fields.get_property.typeinfo.interface,
+   function(self, prop_id, value, pspec)
+      local name = pspec.name:gsub('%-', '_')
+      local prop_set = core.object.query(self, 'repo')._property_set[name]
+      if prop_set then
+	 prop_set(self, value.value)
+      else
+	 self.priv[name] = value.value
+      end
+end)
+
+if not core.guards then core.guards = {} end
+core.guards.get_property = get_property_guard
+core.guards.set_property = set_property_guard
+
+-- _class_init method on the Object will install all properties
+-- accumulated in _property table.  It will be called automatically on
+-- derived classes during class initialization routine.
+function Object:_class_init(class)
+   if next(self._property) then
+      -- First install get/set_property overrides, unless already present.
+      if not self._override.get_property then
+	 class.get_property = get_property_addr
+      end
+      if not self._override.set_property then
+	 class.set_property = set_property_addr
+      end
+
+      -- Install properties.
+      local prop_id = 0
+      for name, pspec in pairs(self._property) do
+	 prop_id = prop_id + 1
+	 class:install_property(prop_id, pspec)
       end
    end
 end
@@ -180,7 +250,7 @@ function Object:_element(object, name)
    -- property of the specified name exists.
    local property = Object._class.find_property(
       object._class, name:gsub('_', '-'))
-   if property then return property, '_paramspec' end
+   if property then return property, '_property' end
 end
 
 -- Sets/gets property using specified marshaller attributes.
@@ -189,7 +259,7 @@ local function marshal_property(obj, name, flags, gtype, marshaller, ...)
    local mode = select('#', ...) > 0 and 'WRITABLE' or 'READABLE'
    if not flags[mode] then
       error(("%s: `%s' not %s"):format(core.object.query(obj, 'repo')._name,
-				       name, mode:lower()))
+				       name, core.downcase(mode)))
    end
    local value = Value(gtype)
    if mode == 'WRITABLE' then
@@ -201,20 +271,22 @@ local function marshal_property(obj, name, flags, gtype, marshaller, ...)
    end
 end
 
--- GI property accessor.
-function Object:_access_property(object, property, ...)
-   local typeinfo = property.typeinfo
-   local gtype = Type.from_typeinfo(typeinfo)
-   local marshaller = Value.find_marshaller(gtype, typeinfo, property.transfer)
-   return marshal_property(object, property.name,
-			   repo.GObject.ParamFlags[property.flags],
-			   gtype, marshaller, ...)
-end
-
--- GLib property accessor (paramspec).
-function Object:_access_paramspec(object, pspec, ...)
-   return marshal_property(object, pspec.name, pspec.flags, pspec.value_type,
-			   Value.find_marshaller(pspec.value_type), ...)
+-- Property accessor.
+function Object:_access_property(object, prop, ...)
+   if gi.isinfo(prop) then
+      -- GI-based property
+      local typeinfo = prop.typeinfo
+      local gtype = Type.from_typeinfo(typeinfo)
+      local marshaller = Value.find_marshaller(gtype, typeinfo,
+					       prop.transfer)
+      return marshal_property(object, prop.name,
+			      repo.GObject.ParamFlags[prop.flags],
+			      gtype, marshaller, ...)
+   else
+      -- pspec-based property
+      return marshal_property(object, prop.name, prop.flags, prop.value_type,
+			      Value.find_marshaller(prop.value_type), ...)
+   end
 end
 
 local quark_from_string = repo.GLib.quark_from_string

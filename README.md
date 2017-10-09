@@ -10,7 +10,7 @@ license, see LICENSE file for full text.
 
 Home of the project is on [GitHub](http://github.com/pavouk/lgi).
 
-LGI is tested and compatible with standard Lua 5.1, Lua 5.2 and
+LGI is tested and compatible with standard Lua 5.1, Lua 5.2, Lua 5.3 and
 LuaJIT2.  Compatibility with other Lua implementations is not tested
 yet.
 
@@ -54,12 +54,85 @@ List of contributors, in no particular order:
 - Craig Barnes
 - Nicola Fontana
 - Andreas Stührk
+- Aaron Faanes
+- Jiří Klimeš
+- Garrett Regier
+- Kenneth Zhou
+- Travis Hoppe
+- Tobias Jakobs
+- Heiko Becker
+- Vincent Bermel
+- Szunti
 
 Many other people contributed to what lgi is today, in many forms -
 writing patches, reporting bugs, packaging for distributions,
 providing ideas, spreading a word...  *Many thanks to all of you!*
 
 ## History
+
+### 0.9.2 (9-Oct-2017)
+
+ - fix assorted crashes in closure callback invocation code
+ - fix double-free bug caused by incorrect annotation of Gio.DBusProxy.get_interface_info
+ - fix marshaling of arrays of pointers
+ - make objects unusable in __gc metamethod
+ - work around API break in GLib 2.54
+ - use structured GLib logging when available
+ - add Gio.Async support also for static methods and global functions
+ - better error message when Gtk.init fails
+ - add support for Travis
+ - don't hardcode pkg-config executable
+ - fix URI in GStreamer sample
+ - fix flags for DBus samples
+
+### 0.9.1 (27-May-2016)
+
+ - marshal NULL strings as nil instead of empty strings.  This allows
+   use of e.g. DataInputStream:read_line() APIs.
+ - fix and improve build for OSX and Win-based configurations
+ - add support for arrays with lengths as struct fields
+ - allow GLib.Variant construction for lightuserdata
+ - fix gtop binding (certain structs could not be imported)
+ - adapt to new set of annotations in newer glib
+ - assorted Lua5.3 fixes, lgi is now fully Lua5.3 compatible
+ - fix binding of Gdk.Rectangle from newer GDK
+
+### 0.9.0 (23-Mar-2015)
+
+ - new feature: allow defining new properties on custom GObject
+   subclasses implemented using lgi
+ - fix: improve compatibility with locales (turkish)
+ - fix: GPtrArray handling
+ - fix: improve behavior when running in assorted multiple-embedded
+   and concurrent scenarios
+
+### 0.8.0 (02-Jul-2014)
+
+ - new feature: add automatically-generated wrappers for
+   do_async()/do_finish() pairs.  Documented as Gio.Async namespace
+   functionality.
+ - new feature: automatically initialize objects implementing
+   Gio.Initable and Gio.AsyncInitable interfaces.
+ - new feature: GLib.Error is now handled properly, functions
+   returning errors return GLib.Error instances instead of error
+   numbers and strings.  This also allows overriding virtual methods
+   from Lua which report errors by returning GLib.Error
+ - new feature: GLib.Bytes support, adding # operator and 'data'
+   property allowing easy use of GLib.Bytes object.  This leads to
+   deprecation of seldomly used modifiable buffers extensions.
+ - optimization: type attribute caching brings significant speedup of
+   method and property lookups.
+ - fix: Gtk: override for Gtk.Menu.popup() compatible with new GTK
+   annotation.
+ - fix: cairo: assorted small fixes of bad signatures, added some
+   convenience properties.
+ - fix: GLib: add overrides for GLib.MarkupParser
+ - fix: Gio: add overrides for Gio.DBus*Info structures
+ - fix: Pango: add override for Pango.GlyphString.glyphs array
+ - fix: Gdk: Add override inheriting specific Gdk.EventXxx from Gdk.Event
+ - fix: Compile cleanly against Lua5.2 with compatibility mode turned on
+ - fix: avoid leak when adding already cached owned record and for
+   retrieving Variant from Value.
 
 ### 0.7.2 (12-Sep-2013)
 
@@ -121,7 +194,7 @@ providing ideas, spreading a word...  *Many thanks to all of you!*
  - Avoid unexpected dependency on cairo-devel, cairo-runtime is now
    enough
  - Make `set_resident()` more robust and fix stack leak for Lua 5.2 case,
-   avoid useless warning when `set_resident()` fails (to accomodate for
+   avoid useless warning when `set_resident()` fails (to accommodate for
    static linking case).
  - Fix small memory leak (mutex) which occured once per opened
    `lua_State` using lgi.

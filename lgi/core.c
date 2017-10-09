@@ -24,6 +24,19 @@
 #define G_REC_MUTEX_INIT
 #endif
 
+/* GLib 2.30 changed g_atomic_int_add() to return the new value. For
+   older GLib versions, use g_atomic_int_exchange_and_add() which did. */
+#if !GLIB_CHECK_VERSION(2, 30, 0)
+#ifdef g_atomic_int_add
+#undef g_atomic_int_add
+#endif
+
+#define g_atomic_int_add(atomic, val) \
+  (g_atomic_int_exchange_and_add ((atomic), (val)))
+#endif
+
+volatile gint global_state_id = 0;
+
 #ifndef NDEBUG
 const char *lgi_sd (lua_State *L)
 {
@@ -109,6 +122,10 @@ lgi_type_get_name (lua_State *L, GIBaseInfo *info)
   GSList *list = NULL, *i;
   int n = 1;
   lua_pushstring (L, g_base_info_get_namespace (info));
+
+  if (g_base_info_get_type (info) == GI_INFO_TYPE_CALLBACK)
+    /* Avoid duplicate name for callbacks. */
+    info = g_base_info_get_container (info);
 
   /* Add names on the whole path, but in reverse order. */
   for (; info != NULL; info = g_base_info_get_container (info))
@@ -363,7 +380,14 @@ core_log (lua_State *L)
   const char *domain = luaL_checkstring (L, 1);
   int level = 1 << (luaL_checkoption (L, 2, log_levels[5], log_levels) + 2);
   const char *message = luaL_checkstring (L, 3);
+
+#if GLIB_CHECK_VERSION(2, 50, 0)
+  /* TODO: We can include more debug information such as lua line numbers */
+  g_log_structured (domain, level, "MESSAGE", "%s", message);
+#else
   g_log (domain, level, "%s", message);
+#endif
+
   return 0;
 }
 
@@ -457,6 +481,10 @@ module_gc (lua_State *L)
 {
   GModule **module = luaL_checkudata (L, 1, UD_MODULE);
   g_module_close (*module);
+
+  /* Unset the metatable / make the module unusable */
+  lua_pushnil (L);
+  lua_setmetatable (L, 1);
   return 0;
 }
 
@@ -519,6 +547,13 @@ core_module (lua_State *L)
     name = g_strdup_printf (MODULE_NAME_FORMAT_PLAIN,
 			    luaL_checkstring (L, 1));
 
+#if defined(__APPLE__)
+  char *path = g_module_build_path (GOBJECT_INTROSPECTION_LIBDIR,
+                                    name);
+  g_free(name);
+  name = path;
+#endif
+
   /* Try to load the module. */
   GModule *module = g_module_open (name, 0);
   if (module == NULL)
@@ -538,6 +573,22 @@ core_module (lua_State *L)
   return 2;
 }
 
+static int core_upcase (lua_State *L)
+{
+  gchar *str = g_ascii_strup (luaL_checkstring (L, 1), -1);
+  lua_pushstring (L, str);
+  g_free (str);
+  return 1;
+}
+
+static int core_downcase (lua_State *L)
+{
+  gchar *str = g_ascii_strdown (luaL_checkstring (L, 1), -1);
+  lua_pushstring (L, str);
+  g_free (str);
+  return 1;
+}
+
 static const struct luaL_Reg lgi_reg[] = {
   { "log",  core_log },
   { "gtype", core_gtype },
@@ -548,6 +599,8 @@ static const struct luaL_Reg lgi_reg[] = {
   { "band", core_band },
   { "bor", core_bor },
   { "module", core_module },
+  { "upcase", core_upcase },
+  { "downcase", core_downcase },
   { NULL, NULL }
 };
 
@@ -586,6 +639,17 @@ set_resident (lua_State *L)
     }
   else
     {
+      if (lua_gettop(L) == 3)
+	{
+	  /* Some Lua versions give us the path to the .so on the stack.
+	     Just load & leak it. */
+	  GModule* module = g_module_open(lua_tostring(L, 2),
+					  G_MODULE_BIND_LAZY |
+					  G_MODULE_BIND_LOCAL);
+	  if (module != NULL)
+	    return;
+	}
+
       /* This hack tries to enumerate the whole registry table and
 	 find 'LOADLIB: path' library.  When it detects itself, it
 	 just removes pointer to the loaded library, disallowing Lua
@@ -619,10 +683,11 @@ set_resident (lua_State *L)
     }
 }
 
-int
+G_MODULE_EXPORT int
 luaopen_lgi_corelgilua51 (lua_State* L)
 {
   LgiStateMutex *mutex;
+  gint state_id;
 
   /* Try to make itself resident.  This is needed because this dynamic
      module is 'statically' linked with glib/gobject, and these
@@ -681,6 +746,22 @@ luaopen_lgi_corelgilua51 (lua_State* L)
   /* Register 'lgi.core' interface. */
   lua_newtable (L);
   luaL_register (L, NULL, lgi_reg);
+
+  /* Add the state ID */
+  state_id = g_atomic_int_add (&global_state_id, 1);
+  if (state_id == 0)
+    lua_pushliteral (L, "");
+  else
+    lua_pushfstring (L, "+L%d", state_id);
+  lua_setfield (L, -2, "id");
+
+  /* Add lock and enter/leave locking functions. */
+  lua_pushlightuserdata (L, lgi_state_get_lock (L));
+  lua_setfield (L, -2, "lock");
+  lua_pushlightuserdata (L, lgi_state_enter);
+  lua_setfield (L, -2, "enter");
+  lua_pushlightuserdata (L, lgi_state_leave);
+  lua_setfield (L, -2, "leave");
 
   /* Create repo and index table. */
   create_repo_table (L, "index", &repo_index);

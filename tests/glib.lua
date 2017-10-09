@@ -115,3 +115,42 @@ function glib.markup_error2()
    check(err.message == 'snafu 1')
    check(saved_err:matches(err))
 end
+
+function glib.gsourcefuncs()
+   local GLib = lgi.GLib
+
+   local called
+   local source_funcs = GLib.SourceFuncs {
+      prepare = function(source, timeout)
+	 called = source
+	 return true, 42
+      end
+   }
+
+   local source = GLib.Source(source_funcs)
+   local res, timeout  = source_funcs.prepare(source)
+   check(res == true)
+   check(timeout == 42)
+   check(called == source)
+end
+
+function glib.coroutine_related_crash()
+    -- This test does not have a specific assert() or check() call. Instead it
+    -- is a regression test: Once upon a time this caused a segmentation fault
+    -- due to a use-after-free.
+
+    local glib = require("lgi").GLib
+    local mainloop = glib.MainLoop.new()
+    coroutine.wrap(function()
+	local co = coroutine.running()
+	for i=1,100 do
+	    glib.timeout_add(glib.PRIORITY_DEFAULT, 0, function()
+		coroutine.resume(co)
+		return false
+	    end)
+	    coroutine.yield()
+	end
+	mainloop:quit()
+    end)()
+    mainloop:run()
+end

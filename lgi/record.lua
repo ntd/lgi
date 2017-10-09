@@ -49,7 +49,31 @@ end
 function record.struct_mt:_element(instance, symbol)
    -- First of all, try normal inherited functionality.
    local element, category = component.mt._element(self, instance, symbol)
-   if element then return element, category end
+   if element then
+      if category == '_field' then
+	 if type(element) == 'table' and element.ret then
+	    category = '_cbkfield'
+	    local ffi = require 'lgi.ffi'
+	    element = {
+	       name = element.name,
+	       ptrfield = { element.offset, 0, ffi.types.ptr },
+	       callable = element
+	    }
+	 elseif gi.isinfo(element) and element.is_field then
+	    local ii = element.typeinfo.interface
+	    if ii and ii.type == 'callback' then
+	       category = '_cbkfield'
+	       local ffi = require 'lgi.ffi'
+	       element = {
+		  name = element.name,
+		  ptrfield = { element.offset, 0, ffi.types.ptr },
+		  callable = ii
+	       }
+	    end
+	 end
+      end
+      return element, category
+   end
 
    -- Special handling of '_native' attribute.
    if symbol == '_native' then return symbol, '_internal'
@@ -92,6 +116,31 @@ function record.struct_mt:_access_field(instance, element, ...)
    else
       -- In other cases, just access the instance using given info.
       return core.record.field(instance, element, ...)
+   end
+end
+
+-- Add accessor for handling fields containing callbacks
+local guards_station = setmetatable({}, { __mode = 'k' })
+function record.struct_mt:_access_cbkfield(instance, element, ...)
+   if select('#', ...) == 0 then
+      -- Reading callback field, get pointer and wrap it in proper
+      -- callable, so that caller can actually call it.
+      local addr = core.record.field(instance, element.ptrfield)
+      return core.callable.new(element.callable, addr)
+   else
+      local target = ...
+      if type(target) ~= 'userdata' then
+	 -- Create closure over Lua target, keep guard stored.
+	 local guard
+	 guard, target = core.marshal.callback(element.callable, target)
+	 local guards = guards_station[instance]
+	 if not guards then
+	    guards = {}
+	    guards_station[instance] = guards
+	 end
+	 guards[element.name] = guard
+      end
+      core.record.field(instance, element.ptrfield, target)
    end
 end
 
@@ -144,13 +193,14 @@ function record.load(info)
    -- i.e. method which has the same name as our record type (except
    -- that type is in CamelCase, while method is
    -- under_score_delimited).  If not found, check for 'new' method.
-   local func = info.name:gsub('([%l%d])([%u])', '%1_%2'):lower()
+   local func = core.downcase(info.name:gsub('([%l%d])([%u])', '%1_%2'))
    local ctor = gi[info.namespace][func] or gi[info.namespace][func .. '_new']
    if not ctor then ctor = info.methods.new end
 
    -- Check, whether ctor is valid.  In order to be valid, it must
    -- return instance of this record.
-   if (ctor and ctor.return_type.tag =='interface'
+   if (ctor and ctor.type == 'function'
+       and ctor.return_type.tag =='interface'
        and ctor.return_type.interface == info) then
       ctor = core.callable.new(ctor)
       record._new = function(typetable, ...) return ctor(...) end

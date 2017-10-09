@@ -6,23 +6,26 @@
 #
 
 PREFIX = /usr/local
+HOST_OS = $(shell uname -s | tr A-Z a-z)
 LUA_VERSION=5.1
 LUA_LIBDIR = $(PREFIX)/lib/lua/$(LUA_VERSION)
 LUA_SHAREDIR = $(PREFIX)/share/lua/$(LUA_VERSION)
 
+PKG_CONFIG = pkg-config
 GINAME = gobject-introspection-1.0
 PKGS = $(GINAME) gmodule-2.0 libffi
 VERSION_FILE = version.lua
 
-ifneq ($(filter CYGWIN%, $(shell uname -s)),)
+ifneq ($(filter cygwin% msys% mingw%, $(HOST_OS)),)
 CORE = corelgilua51.dll
 LIBFLAG = -shared
 LIBS += -llua
 else
-ifeq ($(shell uname -s),Darwin)
+ifeq ($(HOST_OS),darwin)
 CORE = corelgilua51.so
 LIBFLAG = -bundle -undefined dynamic_lookup
 CCSHARED = -fno-common
+GOBJECT_INTROSPECTION_LIBDIR = $(shell $(PKG_CONFIG) --variable=libdir $(GINAME))
 else
 CORE = corelgilua51.so
 LIBFLAG = -shared
@@ -37,14 +40,17 @@ ifndef COPTFLAGS
 CFLAGS = -Wall -Wextra -O2 -g
 endif
 endif
-ALL_CFLAGS = $(CCSHARED) $(COPTFLAGS) $(LUA_CFLAGS) $(shell pkg-config --cflags $(PKGS)) $(CFLAGS)
-LIBS += $(shell pkg-config --libs $(PKGS))
+ifeq ($(HOST_OS),darwin)
+CFLAGS += -DGOBJECT_INTROSPECTION_LIBDIR=\"$(GOBJECT_INTROSPECTION_LIBDIR)\"
+endif
+ALL_CFLAGS = $(CCSHARED) $(COPTFLAGS) $(LUA_CFLAGS) $(shell $(PKG_CONFIG) --cflags $(PKGS)) $(CFLAGS)
+LIBS += $(shell $(PKG_CONFIG) --libs $(PKGS))
 ALL_LDFLAGS = $(LIBFLAG) $(LDFLAGS)
 DEPCHECK = .depcheck
 
 # Precondition check
 $(DEPCHECK) : Makefile
-	pkg-config --exists '$(GINAME) >= 0.10.8' --print-errors
+	$(PKG_CONFIG) --exists '$(GINAME) >= 0.10.8' --print-errors
 	touch $@
 
 .PHONY : all clean install
@@ -79,6 +85,6 @@ install : $(CORE) $(VERSION_FILE)
 	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)
 	cp ../lgi.lua $(DESTDIR)$(LUA_SHAREDIR)
 	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)/lgi
-	cp $(CORESOURCES) $(VERSION_FILE) $(DESTDIR)$(LUA_SHAREDIR)/lgi
+	cp $(CORESOURCES) $(DESTDIR)$(LUA_SHAREDIR)/lgi
 	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)/lgi/override
 	cp $(OVERRIDES) $(DESTDIR)$(LUA_SHAREDIR)/lgi/override

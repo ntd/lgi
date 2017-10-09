@@ -2,7 +2,7 @@
 --
 --  LGI Gdk3 override module.
 --
---  Copyright (c) 2011 Pavel Holejsovsky
+--  Copyright (c) 2011, 2014 Pavel Holejsovsky
 --  Licensed under the MIT license:
 --  http://www.opensource.org/licenses/mit-license.php
 --
@@ -23,13 +23,15 @@ local cairo = lgi.cairo
 core.registerlock(core.gi.Gdk.resolve.gdk_threads_set_lock_functions)
 Gdk.threads_init()
 
--- Gdk.Rectangle does not exist at all, because it is aliased to
--- cairo.RectangleInt.  Make sure that we have it exists, because it
--- is very commonly used in API documentation.
-Gdk.Rectangle = lgi.cairo.RectangleInt
-Gdk.Rectangle._method = rawget(Gdk.Rectangle, '_method') or {}
-Gdk.Rectangle._method.intersect = Gdk.rectangle_intersect
-Gdk.Rectangle._method.union = Gdk.rectangle_union
+-- Gdk.Rectangle does not exist at all in older GOI, because it is
+-- aliased to cairo.RectangleInt.  Make sure that we have it exists,
+-- because it is very commonly used in API documentation.
+if not Gdk.Rectangle then
+   Gdk.Rectangle = lgi.cairo.RectangleInt
+   Gdk.Rectangle._method = rawget(Gdk.Rectangle, '_method') or {}
+   Gdk.Rectangle._method.intersect = Gdk.rectangle_intersect
+   Gdk.Rectangle._method.union = Gdk.rectangle_union
+end
 
 -- Declare GdkAtoms which are #define'd in Gdk sources and not
 -- introspected in gir.
@@ -113,4 +115,19 @@ for _, name in pairs { 'clip_rectangle', 'source_color', 'source_pixbuf',
       get = cairo.Context._method['get_' .. name],
       set = cairo.Context._method['set_' .. name],
    }
+end
+
+-- Gdk events have strange hierarchy; GdkEvent is union of all known
+-- GdkEventXxx specific types.  This means that generic gdk_event_xxx
+-- methods are not available on GdkEventXxxx specific types.  Work
+-- around this by setting GdkEvent as parent for GdkEventXxxx specific
+-- types.
+for _, event_type in pairs {
+   'Any', 'Expose', 'Visibility', 'Motion', 'Button', 'Touch', 'Scroll', 'Key',
+   'Crossing', 'Focus', 'Configure', 'Property', 'Selection', 'OwnerChange',
+   'Proximity', 'DND', 'WindowState', 'Setting', 'GrabBroken' } do
+   local event = Gdk['Event' .. event_type]
+   if event then
+      event._parent = Gdk.Event
+   end
 end

@@ -122,3 +122,19 @@ function dbus.info_xml()
    check(node.interfaces[1].properties[1].flags.READABLE)
    check(node.interfaces[1].properties[1].flags.WRITABLE)
 end
+
+function dbus.proxy_get_interface_info()
+   local Gio = lgi.Gio
+
+   local interface = Gio.DBusInterfaceInfo {
+      name = 'SomeInterface'
+   }
+   local bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+   local proxy, err = Gio.DBusProxy.new_sync(bus, Gio.DBusProxyFlags.NONE, interface, "org.foo", "/", "org.foo.SomeInterface", nil)
+   assert(proxy, err)
+
+   local interface2 = proxy:get_interface_info()
+
+   -- Just so that we do test something
+   assert(interface == interface2)
+end
